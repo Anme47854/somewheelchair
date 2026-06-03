@@ -1,0 +1,197 @@
+在jenkines中使用
+
+```shell
+#!/bin/bash
+#Desc：自动部署微服务应用
+
+sub_path=${JOB_NAME}
+red='\033[0;31m'
+green='\033[0;32m'
+yellow='\033[0;33m'
+plain='\033[0m'
+LOCAL_MAVEN_REPO="/opt/maven/repository"
+
+#判断是否打包成功
+flag=false;
+
+#判断部署结果
+deploy_result=true
+#删除jenkins 上maven 的local仓库包，避免拉取旧包
+rm -rf ${LOCAL_MAVEN_REPO}/com/*
+
+#获取改项目的服务器器地址
+ip_list=$(ansible ${JOB_NAME} --list | grep -E '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}')
+ip_count=$(echo ${ip_list} |wc -w)
+delpoy_sn=1
+
+if docker images | grep -q "*/${JOB_NAME}"; then
+  echo "删除旧镜像"
+  docker rmi $(docker images -q "*/${JOB_NAME}") || true
+fi
+
+deploy(){
+    /opt/maven/bin/mvn -f ${sub_path} clean install package;
+    if [ $? -eq 0 ];then
+        flag=true;
+    fi
+
+    if [ ${TEST} == true ];then
+        if [ $flag == true ];then
+            echo -e "###########################################################################"
+            echo -e "##${green}测试编译打包成功，正常退出${plain} "
+            echo -e "###########################################################################\n"
+            exit 0;
+        else
+            echo -e "###########################################################################"
+            echo -e "##${red}测试编译打包失败，退出${plain}"
+            echo -e "###########################################################################\n"
+            exit 1;
+        fi
+    fi
+
+    # ==================== 更可靠地获取 IP 列表 ====================
+    echo "正在获取服务器列表..."
+    ip_list=$(ansible ${JOB_NAME} --list | grep -oE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | sort | uniq)
+
+    # 转成数组
+    mapfile -t ips <<< "${ip_list}"
+    total=${#ips[@]}
+
+    if [ ${total} -eq 0 ]; then
+        echo -e "${red}未找到任何服务器${plain}"
+        exit 1
+    fi
+	echo -e "共检测到 ${green}${total}${plain} 台服务器\n"
+
+    # ==================== 第一台 ====================
+    echo -e "###########################################################################"
+    echo -e "## 开始部署（第一台）"
+    echo -e "###########################################################################\n"
+
+    first_ip=${ips[0]}
+    delpoy_sn=1
+
+    deploy_one_server "${first_ip}" "${delpoy_sn}" "${total}"
+	  #根据上一个命令获取的状态来确认是否继续
+    if [ $? -ne 0 ]; then
+        echo -e "${red}第一台部署失败，停止全部部署！${plain}"
+        exit 1
+    fi
+
+    # ==================== 后续服务器批量并行部署（每批4台） ====================
+    if [ ${total} -gt 1 ]; then
+        echo -e "\n${green}第一台启动成功，开始批量并行部署（每批 4 台）...${plain}\n"
+        # 每批并行部署的服务器数量
+        batch_size=4
+		# 从第二台开始（索引1）
+        start_idx=1
+
+        #只要当前处理的服务器索引（start_idx）小于服务器总数量（total），就继续执行循环
+        while [ ${start_idx} -lt ${total} ]; do
+		    # 当前批次的 IP 数组
+            batch=()
+            # 用于显示的 IP 字符串
+            batch_ips_str=""
+            # 组装当前批次的服务器 IP
+            for ((i=0; i<batch_size && start_idx<total; i++)); do
+                batch+=("${ips[start_idx]}")
+                batch_ips_str="${batch_ips_str} ${ips[start_idx]}"
+                ((start_idx++))
+            done
+            # 当前批次实际服务器数量
+            batch_count=${#batch[@]}
+            # 将数组转为 Ansible -l 可接受的格式: ip1,ip2,ip3,ip4
+            limit=$(IFS=,; echo "${batch[*]}")
+
+            echo -e "###########################################################################"
+            echo -e "## 即将并行部署下一批 ${batch_count} 台服务器：${green}${batch_ips_str# }${plain}"
+            echo -e "###########################################################################\n"
+
+            # ====================并行执行 Ansible Playbook ====================
+            echo "正在并行执行 Docker 更新（${batch_count} 台）..."
+            # 只在当前批次的服务器上执行、传递项目名称变量、设置并行度（建议不小于批次数量）
+			ansible-playbook /opt/dockerUpdate/DockerUpdate.yml -l "${limit}" -e "PROJECT_NAME=${JOB_NAME}" --forks ${batch_count}
+
+            # 判断本批次是否全部成功
+            if [ $? -ne 0 ]; then
+                echo -e "${red}批量部署失败！${plain}"
+                exit 1
+            fi
+
+            echo -e "${green}本批 ${batch_count} 台 Docker 更新全部成功${plain}\n"
+        done
+    fi
+
+    echo -e "\n###########################################################################"
+    echo -e "## ${green}所有服务器部署完成！共 ${total} 台${plain}"
+    echo -e "###########################################################################\n"
+}
+
+deploy_one_server(){
+    local ip=$1
+    local sn=$2
+    local total=$3
+
+    echo -e "###########################################################################"
+    echo -e "##【${sn}/${total}】正在部署到 ${green}${ip}${plain}"
+    echo -e "###########################################################################\n"
+
+    # 执行 Ansible Playbook（停止旧容器 + 启动新容器）
+    ansible-playbook /opt/dockerUpdate/DockerUpdate.yml -l "${ip}" -e "PROJECT_NAME=${JOB_NAME}"
+    if [ $? -ne 0 ]; then
+        echo -e "${red}${ip} Docker 部署失败${plain}"
+        return 1
+    fi
+
+    echo -e "${green}${ip} 容器启动完成，开始实时监控日志...${plain}\n"
+
+    # ================== 实时输出日志并判断启动结果 ==================
+    ansible "${ip}" -m copy -a "src=/opt/tailFlogs.sh dest=/opt/${JOB_NAME}/tailFlogs.sh mode=0755"
+    ssh -o StrictHostKeyChecking=no -i /root/.ssh/id_rsa sfmobile@${ip} "cd /opt/${JOB_NAME} && sh tailFlogs.sh"
+
+    # 获取 ansible 执行的退出码
+    if [ ${PIPESTATUS[0]} -eq 0 ]; then
+        echo -e "${green} ${ip} 应用启动成功！${plain}"
+        sleep 8
+        return 0
+    else
+        echo -e "${red} ${ip} 启动失败或超时${plain}"
+        return 1
+    fi
+}
+```
+
+本地目录的
+[root@AutoDeploy opt]# cat /opt/dockerUpdate/DockerUpdate.yml
+```shell
+---
+- name: Manage Docker containers
+  hosts: "{{ PROJECT_NAME }}"
+  order: inventory
+  vars:
+    PROJECT_NAME: "{{ PROJECT_NAME }}"
+  
+  tasks:
+    - name: Stop and remove containers
+      shell: "docker-compose -f /opt/DockerCompose/{{ PROJECT_NAME }}/docker-compose.yml down"
+      args:
+        executable: /bin/bash
+      register: compose_down_result
+      ignore_errors: yes
+    
+    - name: Remove old image if exists
+      shell: |
+        if docker images | grep -q "{{ PROJECT_NAME }}"; then
+          docker rmi $(docker images -q "{{ PROJECT_NAME }}") || true
+        fi
+      args:
+        executable: /bin/bash
+      register: remove_image_result
+      ignore_errors: yes
+    
+    - name: Start containers
+      shell: "docker-compose -f /opt/DockerCompose/{{ PROJECT_NAME }}/docker-compose.yml up -d"
+      args:
+        executable: /bin/bash
+      register: compose_up_result
+```
