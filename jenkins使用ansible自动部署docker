@@ -1,5 +1,5 @@
 #!/bin/bash
-#Desc：自动部署微服务应用
+#Desc：自动部署容器服务
 
 sub_path=${JOB_NAME}
 red='\033[0;31m'
@@ -31,7 +31,11 @@ deploy(){
     if [ $? -eq 0 ];then
         flag=true;
     fi
-
+	#需要设置拷贝的dockerfile路径
+    cd /opt/jenkins/workspace/${JOB_NAME}/target
+    cp /opt/Dockerfile /opt/jenkins/workspace/${JOB_NAME}/target/Dockerfile
+    #当时写docker-compose的时候没意识到PROJECT_NAME这个参数可以写成和JOB_NAME一致，后续可以自己考虑
+    docker build -t ${harbor仓库}/${项目}/${JOB_NAME}:${版本号} --build-arg PROJECT_NAME=${JOB_NAME}
     if [ ${TEST} == true ];then
         if [ $flag == true ];then
             echo -e "###########################################################################"
