@@ -1,0 +1,14 @@
+1、什么是RBAC
+RBAC全称Role-Based Access Control，是Kubernetes集群基于角色的访问控制，实现授权决策，允许通过Kubernetes API动态配置策略。
+
+2、什么是Role
+Role是一组权限的集合，例如Role可以包含列出Pod权限及列出Deployment权限，Role用于给某个NameSpace中的资源进行鉴权。
+
+3、什么是ClusterRole
+ClusterRole是一组权限的集合，但与Role不同的是，ClusterRole可以在包括所有NameSpace和集群级别的资源或非资源类型进行鉴权。
+
+4、什么是Subject
+Subject：有三种Subjects，分别是Service Account、User Account、Groups，参照官方文档主要区别是User Account针对人，Service Accounts针对运行在Pods中运行的进程。
+
+5、什么是RoleBinding与ClusterRoleBinding
+RoleBinding与ClusterRoleBindin：将Subject绑定到Role或ClusterRole。其区别在于：RoleBinding将使规则在命名空间内生效，而ClusterRoleBinding将使规则在所有命名空间中生效。
